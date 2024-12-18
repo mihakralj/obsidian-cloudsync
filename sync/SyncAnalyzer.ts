@@ -1,6 +1,7 @@
 import { AbstractManager, File } from "./AbstractManager";
 import { LogManager } from "../LogManager";
 import { LogLevel } from "./types";
+import { SyncError, CacheError } from "./errors";
 import { Scenario, SyncRule } from "./types/sync";
 import { CacheManager } from "./CacheManager";
 import { LocalManager } from "./localManager";
@@ -27,15 +28,31 @@ export class SyncAnalyzer {
         const scenarios: Scenario[] = [];
 
         try {
-            await Promise.all([
-                this.localCache.readCache(),
-                this.syncCache.readCache()
-            ]);
+            try {
+                await Promise.all([
+                    this.localCache.readCache().catch(error => {
+                        throw new CacheError('read local cache', error.message);
+                    }),
+                    this.syncCache.readCache().catch(error => {
+                        throw new CacheError('read sync cache', error.message);
+                    })
+                ]);
+            } catch (error) {
+                throw new SyncError('cache initialization', error.message);
+            }
 
-            [this.localFiles, this.remoteFiles] = await Promise.all([
-                this.local.getFiles(),
-                this.remote.getFiles()
-            ]);
+            try {
+                [this.localFiles, this.remoteFiles] = await Promise.all([
+                    this.local.getFiles().catch(error => {
+                        throw new SyncError('local file listing', error.message);
+                    }),
+                    this.remote.getFiles().catch(error => {
+                        throw new SyncError('remote file listing', error.message);
+                    })
+                ]);
+            } catch (error) {
+                throw new SyncError('file listing', error.message);
+            }
 
             LogManager.log(LogLevel.Info, `${this.remote.name} ☁️: ${this.remoteFiles.length}`);
 
@@ -48,8 +65,9 @@ export class SyncAnalyzer {
 
             return scenarios;
         } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
             LogManager.log(LogLevel.Error, 'Failed to analyze sync requirements', error);
-            throw error;
+            throw new SyncError('analysis', message);
         }
     }
 
@@ -77,76 +95,88 @@ export class SyncAnalyzer {
     }
 
     private handleMissingRemoteFile(localFile: File, scenarios: Scenario[]): void {
-        const syncedMd5 = this.syncCache.getMd5(localFile.name);
-        const localCachedMd5 = this.localCache.getMd5(localFile.name);
+        try {
+            const syncedMd5 = this.syncCache.getMd5(localFile.name);
+            const localCachedMd5 = this.localCache.getMd5(localFile.name);
 
-        if (!syncedMd5) {
-            scenarios.push({
-                local: localFile,
-                remote: null,
-                rule: "LOCAL_TO_REMOTE",
-            });
-            LogManager.log(LogLevel.Debug, `New local file, uploading: ${localFile.name}`);
-        } else if (localCachedMd5 && localCachedMd5 === syncedMd5) {
-            scenarios.push({
-                local: localFile,
-                remote: null,
-                rule: "DELETE_LOCAL",
-            });
-            LogManager.log(LogLevel.Debug, `File unchanged since last sync, deleting locally: ${localFile.name}`);
-        } else {
-            scenarios.push({
-                local: localFile,
-                remote: null,
-                rule: "LOCAL_TO_REMOTE",
-            });
-            LogManager.log(LogLevel.Debug, `Local file modified, re-uploading: ${localFile.name}`);
+            if (!syncedMd5) {
+                scenarios.push({
+                    local: localFile,
+                    remote: null,
+                    rule: "LOCAL_TO_REMOTE",
+                });
+                LogManager.log(LogLevel.Debug, `New local file, uploading: ${localFile.name}`);
+            } else if (localCachedMd5 && localCachedMd5 === syncedMd5) {
+                scenarios.push({
+                    local: localFile,
+                    remote: null,
+                    rule: "DELETE_LOCAL",
+                });
+                LogManager.log(LogLevel.Debug, `File unchanged since last sync, deleting locally: ${localFile.name}`);
+            } else {
+                scenarios.push({
+                    local: localFile,
+                    remote: null,
+                    rule: "LOCAL_TO_REMOTE",
+                });
+                LogManager.log(LogLevel.Debug, `Local file modified, re-uploading: ${localFile.name}`);
+            }
+        } catch (error) {
+            throw new SyncError('missing remote analysis', `Failed to analyze ${localFile.name}: ${error.message}`);
         }
     }
 
     private handleMissingLocalFile(remoteFile: File, scenarios: Scenario[]): void {
-        if (this.syncCache.hasFile(remoteFile.name)) {
-            scenarios.push({
-                local: null,
-                remote: remoteFile,
-                rule: "DELETE_REMOTE",
-            });
-            LogManager.log(LogLevel.Debug, `File deleted locally, removing from remote: ${remoteFile.name}`);
-        } else {
-            scenarios.push({
-                local: null,
-                remote: remoteFile,
-                rule: "REMOTE_TO_LOCAL",
-            });
-            LogManager.log(LogLevel.Debug, `New remote file, downloading: ${remoteFile.name}`);
+        try {
+            if (this.syncCache.hasFile(remoteFile.name)) {
+                scenarios.push({
+                    local: null,
+                    remote: remoteFile,
+                    rule: "DELETE_REMOTE",
+                });
+                LogManager.log(LogLevel.Debug, `File deleted locally, removing from remote: ${remoteFile.name}`);
+            } else {
+                scenarios.push({
+                    local: null,
+                    remote: remoteFile,
+                    rule: "REMOTE_TO_LOCAL",
+                });
+                LogManager.log(LogLevel.Debug, `New remote file, downloading: ${remoteFile.name}`);
+            }
+        } catch (error) {
+            throw new SyncError('missing local analysis', `Failed to analyze ${remoteFile.name}: ${error.message}`);
         }
     }
 
     private handleFileDifference(localFile: File, remoteFile: File, scenarios: Scenario[]): void {
-        const syncedMd5 = this.syncCache.getMd5(localFile.name);
-        const localCachedMd5 = this.localCache.getMd5(localFile.name);
+        try {
+            const syncedMd5 = this.syncCache.getMd5(localFile.name);
+            const localCachedMd5 = this.localCache.getMd5(localFile.name);
 
-        if (syncedMd5 && syncedMd5 === remoteFile.md5) {
-            scenarios.push({
-                local: localFile,
-                remote: remoteFile,
-                rule: "LOCAL_TO_REMOTE",
-            });
-            LogManager.log(LogLevel.Debug, `Local changes detected, uploading: ${localFile.name}`);
-        } else if (localCachedMd5 && localCachedMd5 === localFile.md5) {
-            scenarios.push({
-                local: localFile,
-                remote: remoteFile,
-                rule: "REMOTE_TO_LOCAL",
-            });
-            LogManager.log(LogLevel.Debug, `Remote changes detected, downloading: ${localFile.name}`);
-        } else {
-            scenarios.push({
-                local: localFile,
-                remote: remoteFile,
-                rule: "DIFF_MERGE",
-            });
-            LogManager.log(LogLevel.Debug, `Conflict detected, needs merge: ${localFile.name}`);
+            if (syncedMd5 && syncedMd5 === remoteFile.md5) {
+                scenarios.push({
+                    local: localFile,
+                    remote: remoteFile,
+                    rule: "LOCAL_TO_REMOTE",
+                });
+                LogManager.log(LogLevel.Debug, `Local changes detected, uploading: ${localFile.name}`);
+            } else if (localCachedMd5 && localCachedMd5 === localFile.md5) {
+                scenarios.push({
+                    local: localFile,
+                    remote: remoteFile,
+                    rule: "REMOTE_TO_LOCAL",
+                });
+                LogManager.log(LogLevel.Debug, `Remote changes detected, downloading: ${localFile.name}`);
+            } else {
+                scenarios.push({
+                    local: localFile,
+                    remote: remoteFile,
+                    rule: "DIFF_MERGE",
+                });
+                LogManager.log(LogLevel.Debug, `Conflict detected, needs merge: ${localFile.name}`);
+            }
+        } catch (error) {
+            throw new SyncError('file difference analysis', `Failed to analyze differences for ${localFile.name}: ${error.message}`);
         }
     }
 }

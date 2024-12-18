@@ -1,6 +1,7 @@
 import { File } from "./AbstractManager";
 import { LogManager } from "../LogManager";
 import { LogLevel } from "./types";
+import { CacheError, FileOperationError } from "./errors";
 import { App, normalizePath } from "obsidian";
 import { dirname } from "path-browserify";
 
@@ -57,15 +58,20 @@ export class CacheManager {
             const exists = await this.app.vault.adapter.exists(relativePath);
 
             if (!exists) {
-                LogManager.log(LogLevel.Debug, 'No cache file found');
+                LogManager.log(LogLevel.Debug, 'No cache file found, initializing empty cache');
                 this.fileCache = new Map();
                 this.lastSync = null;
                 return;
             }
 
-            const arrayBuffer = await this.app.vault.adapter.readBinary(relativePath);
-            const content = this.decoder.decode(arrayBuffer);
-            const { lastSync, fileCache } = JSON.parse(content);
+            if (!this.app.vault.adapter) {
+                throw new CacheError('read', 'Vault adapter not available');
+            }
+
+            try {
+                const arrayBuffer = await this.app.vault.adapter.readBinary(relativePath);
+                const content = this.decoder.decode(arrayBuffer);
+                const { lastSync, fileCache } = JSON.parse(content);
             this.lastSync = lastSync ? new Date(lastSync) : null;
 
             this.fileCache = new Map();
@@ -75,8 +81,14 @@ export class CacheManager {
             }
 
             LogManager.log(LogLevel.Debug, `Cache loaded with ${this.fileCache.size} entries`);
+            } catch (error) {
+                throw new CacheError('read', `Failed to parse cache file: ${error.message}`);
+            }
         } catch (error) {
-            LogManager.log(LogLevel.Debug, 'Invalid cache file', error);
+            if (error instanceof CacheError) {
+                throw error;
+            }
+            LogManager.log(LogLevel.Debug, 'Cache read failed, initializing empty cache', error);
             this.fileCache = new Map();
             this.lastSync = null;
         }
@@ -97,16 +109,27 @@ export class CacheManager {
         }, null, 2);
 
         try {
+            if (!this.app.vault.adapter) {
+                throw new CacheError('write', 'Vault adapter not available');
+            }
+
             await this.ensureCacheDirectoryExists();
             const relativePath = this.getVaultRelativePath();
-            await this.app.vault.adapter.writeBinary(
-                relativePath,
-                this.encoder.encode(fileCacheJson)
-            );
-            LogManager.log(LogLevel.Debug, `Cache updated with ${files.length} entries`);
+
+            try {
+                await this.app.vault.adapter.writeBinary(
+                    relativePath,
+                    this.encoder.encode(fileCacheJson)
+                );
+                LogManager.log(LogLevel.Debug, `Cache updated with ${files.length} entries`);
+            } catch (error) {
+                throw new CacheError('write', `Failed to write cache file: ${error.message}`);
+            }
         } catch (error) {
-            LogManager.log(LogLevel.Error, 'Failed to write cache file', error);
-            throw error;
+            if (error instanceof CacheError) {
+                throw error;
+            }
+            throw new CacheError('write', `Unexpected error: ${error.message}`);
         }
     }
 

@@ -5,20 +5,20 @@
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
-		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production && mkdir -p '/Users/mihakralj/Obsidian/Personal/.obsidian/plugins/cloudsync' && cp main.js manifest.json styles.css '/Users/mihakralj/Obsidian/Personal/.obsidian/plugins/cloudsync/'",
-		"wbuild": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production && powershell -Command \"Copy-Item -Path main.js, manifest.json, styles.css -Destination 'D:/temp/testing/.obsidian/plugins/cloudsync'\" && powershell -Command \"Copy-Item -Path main.js, manifest.json, styles.css -Destination 'D:/temp1/testing/.obsidian/plugins/cloudsync'\"",
+		"build": "npx tsc -noEmit -skipLibCheck && node esbuild.config.mjs production && mkdir -p '/Users/mihakralj/Obsidian/Personal/.obsidian/plugins/cloudsync' && cp main.js manifest.json styles.css '/Users/mihakralj/Obsidian/Personal/.obsidian/plugins/cloudsync/'",
+		"wbuild": "npx tsc -noEmit -skipLibCheck && node esbuild.config.mjs production && powershell -Command \"Copy-Item -Path main.js, manifest.json, styles.css -Destination 'D:/temp/testing/.obsidian/plugins/cloudsync'\" && powershell -Command \"Copy-Item -Path main.js, manifest.json, styles.css -Destination 'D:/temp1/testing/.obsidian/plugins/cloudsync'\"",
 		"version": "node version-bump.mjs && git add manifest.json versions.json"
 	},
 	"keywords": [],
 	"author": "",
 	"license": "MIT",
 	"dependencies": {
+		"builtin-modules": "^3.2.0",
 		"crypto-js": "^4.2.0",
 		"diff-match-patch": "^1.0.5",
 		"mime": "^3.0.0",
 		"path-browserify": "^1.0.1",
-		"tslib": "^2.6.2",
-		"builtin-modules": "^3.2.0"
+		"tslib": "^2.6.2"
 	},
 	"devDependencies": {
 		"@types/crypto-js": "^4.2.2",
@@ -27,6 +27,6 @@
 		"@types/path-browserify": "^1.0.3",
 		"esbuild": "^0.19.11",
 		"obsidian": "^1.4.11",
-		"typescript": "4.7.4"
+		"typescript": "^4.9.4"
 	}
 }

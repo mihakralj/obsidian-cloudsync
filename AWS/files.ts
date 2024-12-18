@@ -4,10 +4,36 @@ import { LogManager } from '../LogManager';
 import { AWSSigning } from './signing';
 import { AWSPaths } from './paths';
 import { encodeURIPath } from './encoding';
+import { withRetry } from '../sync/utils/commonUtils';
 
-const MAX_RETRIES = 3;
+interface S3RequestConfig {
+    method: string;
+    path: string;
+    queryParams?: Record<string, string>;
+    contentType?: string;
+    body?: Uint8Array;
+}
+
+interface S3Response {
+    status: number;
+    headers: Record<string, string>;
+    text: () => Promise<string>;
+    arrayBuffer: () => Promise<ArrayBuffer>;
+    ok: boolean;
+}
 
 export class AWSFiles {
+    private static readonly DEFAULT_CONTENT_TYPE = 'application/octet-stream';
+    private static readonly MAX_RETRIES = 3;
+    private static readonly RETRY_OPTIONS = {
+        maxAttempts: AWSFiles.MAX_RETRIES,
+        delayMs: 1000,
+        backoff: true,
+        onRetry: (attempt: number, error: Error) => {
+            LogManager.log(LogLevel.Debug, `Retrying S3 operation`, { attempt, error: error.message });
+        }
+    };
+
     constructor(
         private readonly bucket: string,
         private readonly endpoint: string,
@@ -15,293 +41,193 @@ export class AWSFiles {
         private readonly paths: AWSPaths
     ) {}
 
-    private getResponseHeaders(response: Response): Record<string, string> {
-        const headers: Record<string, string> = {};
-        response.headers.forEach((value, key) => {
-            headers[key] = value;
+    private convertHeaders(headers: Headers): Record<string, string> {
+        const result: Record<string, string> = {};
+        headers.forEach((value, key) => {
+            result[key] = value;
         });
-        return headers;
+        return result;
     }
 
-    private async parseErrorResponse(response: Response): Promise<string> {
+    private async makeS3Request(config: S3RequestConfig): Promise<S3Response> {
+        const { method, path, queryParams = {}, contentType = AWSFiles.DEFAULT_CONTENT_TYPE, body } = config;
+        const host = new URL(this.endpoint).host;
+        const amzdate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
+
+        const headers = await this.signing.signRequest({
+            method,
+            path,
+            queryParams,
+            host,
+            amzdate,
+            contentType,
+            body
+        });
+
+        const url = this.buildS3Url(path, queryParams);
+        LogManager.log(LogLevel.Debug, 'Making S3 request', { url, method });
+
+        const requestInit: RequestInit = { method, headers };
+        if (body) {
+            requestInit.body = body;
+            requestInit.headers = {
+                ...headers,
+                'Content-Length': body.length.toString()
+            };
+        }
+
+        const response = await fetch(url, requestInit);
+        return {
+            status: response.status,
+            headers: this.convertHeaders(response.headers),
+            text: () => response.text(),
+            arrayBuffer: () => response.arrayBuffer(),
+            ok: response.ok
+        };
+    }
+
+    private buildS3Url(path: string, queryParams: Record<string, string> = {}): string {
+        const baseUrl = `${this.endpoint}${path}`;
+        const params = new URLSearchParams(queryParams);
+        const queryString = params.toString();
+        return queryString ? `${baseUrl}?${queryString}` : baseUrl;
+    }
+
+    private async parseS3Error(response: S3Response): Promise<string> {
         try {
             const text = await response.text();
-            LogManager.log(LogLevel.Debug, 'Parsing error response', { text });
-
             const parser = new DOMParser();
             const xmlDoc = parser.parseFromString(text, "text/xml");
             const errorElement = xmlDoc.getElementsByTagName('Error')[0];
 
             if (errorElement) {
-                const code = errorElement.getElementsByTagName('Code')[0]?.textContent;
-                const message = errorElement.getElementsByTagName('Message')[0]?.textContent;
+                const code = errorElement.getElementsByTagName('Code')[0]?.textContent ?? 'UnknownError';
+                const message = errorElement.getElementsByTagName('Message')[0]?.textContent ?? 'Unknown error occurred';
                 return `${code}: ${message}`;
             }
-        } catch (e) {
-            LogManager.log(LogLevel.Debug, 'Failed to parse error response', e);
+        } catch (error) {
+            LogManager.log(LogLevel.Debug, 'Failed to parse S3 error response', error);
         }
         return `HTTP error! status: ${response.status}`;
     }
 
-    private isRateLimitError(error: Error): boolean {
-        return error.message.includes('SlowDown');
-    }
-
-    private async delay(ms: number): Promise<void> {
-        return new Promise(resolve => setTimeout(resolve, ms));
-    }
-
-    private getRetryDelay(retryCount: number): number {
-        if (retryCount <= 2) return (retryCount + 1) * 1000;
-        return 3000;
-    }
-
-    private async retryWithBackoff<T>(
-        operation: () => Promise<T>,
-        retryCount = 0
-    ): Promise<T> {
-        try {
-            return await operation();
-        } catch (error) {
-            if (!(error instanceof Error) || !this.isRateLimitError(error) || retryCount >= MAX_RETRIES) {
-                throw error;
-            }
-
-            const delayMs = this.getRetryDelay(retryCount);
-            LogManager.log(LogLevel.Debug, `Rate limit hit, retrying in ${delayMs}ms`, {
-                attempt: retryCount + 1,
-                maxRetries: MAX_RETRIES
-            });
-
-            await this.delay(delayMs);
-            return this.retryWithBackoff(operation, retryCount + 1);
+    private async handleS3Response(response: S3Response, operation: string): Promise<S3Response> {
+        if (!response.ok) {
+            const errorMessage = await this.parseS3Error(response);
+            throw new Error(`S3 ${operation} failed: ${errorMessage}`);
         }
+        return response;
     }
 
     async readFile(file: File): Promise<Uint8Array> {
-        LogManager.log(LogLevel.Trace, `Reading ${file.name} from S3`);
-        try {
-            const prefixedPath = this.paths.addVaultPrefix(file.remoteName || this.paths.localToRemoteName(file.name));
-            const encodedPath = encodeURIPath(prefixedPath);
+        return withRetry(async () => {
+            const remotePath = this.paths.addVaultPrefix(file.remoteName || this.paths.localToRemoteName(file.name));
+            const encodedPath = encodeURIPath(remotePath);
 
-            LogManager.log(LogLevel.Debug, 'Prepared S3 path', {
-                original: file.name,
-                prefixedPath,
-                encodedPath
-            });
+            LogManager.log(LogLevel.Trace, `Reading ${file.name} from S3`);
 
-            const headers = await this.signing.signRequest({
+            const response = await this.makeS3Request({
                 method: 'GET',
-                path: `/${this.bucket}/${encodedPath}`,
-                queryParams: {},
-                host: new URL(this.endpoint).host,
-                amzdate: new Date().toISOString().replace(/[:-]|\.\d{3}/g, ''),
-                contentType: 'application/octet-stream'
+                path: `/${this.bucket}/${encodedPath}`
             });
 
-            const url = `${this.endpoint}/${this.bucket}/${encodedPath}`;
-            LogManager.log(LogLevel.Debug, 'Constructed S3 URL', { url });
-
-            const response = await fetch(url, {
-                method: 'GET',
-                headers
-            });
-
-            if (!response.ok) {
-                const errorMessage = await this.parseErrorResponse(response);
-                throw new Error(errorMessage);
-            }
-
-            const arrayBuffer = await response.arrayBuffer();
-            const buffer = new Uint8Array(arrayBuffer);
+            await this.handleS3Response(response, 'read');
+            const buffer = new Uint8Array(await response.arrayBuffer());
 
             LogManager.log(LogLevel.Trace, `Read ${buffer.length} bytes from ${file.name}`);
             return buffer;
-        } catch (error) {
-            LogManager.log(LogLevel.Error, `Failed to read ${file.name} from S3`, error);
-            throw error;
-        }
+        }, AWSFiles.RETRY_OPTIONS);
     }
 
     async writeFile(file: File, content: Uint8Array): Promise<void> {
-        LogManager.log(LogLevel.Trace, `Writing ${file.name} to S3 (${content.length} bytes)`);
+        return withRetry(async () => {
+            const remotePath = this.paths.addVaultPrefix(file.remoteName || this.paths.localToRemoteName(file.name));
+            const encodedPath = encodeURIPath(remotePath);
 
-        const operation = async () => {
-            const prefixedPath = this.paths.addVaultPrefix(file.remoteName || this.paths.localToRemoteName(file.name));
-            const encodedPath = encodeURIPath(prefixedPath);
+            LogManager.log(LogLevel.Trace, `Writing ${file.name} to S3 (${content.length} bytes)`);
 
-            LogManager.log(LogLevel.Debug, 'Prepared S3 path', {
-                original: file.name,
-                prefixedPath,
-                encodedPath
-            });
-
-            const headers = await this.signing.signRequest({
+            const response = await this.makeS3Request({
                 method: 'PUT',
                 path: `/${this.bucket}/${encodedPath}`,
-                queryParams: {},
-                host: new URL(this.endpoint).host,
-                amzdate: new Date().toISOString().replace(/[:-]|\.\d{3}/g, ''),
-                contentType: 'application/octet-stream',
                 body: content
             });
 
-            const url = `${this.endpoint}/${this.bucket}/${encodedPath}`;
-            LogManager.log(LogLevel.Debug, 'Prepared S3 request', {
-                url,
-                method: 'PUT',
-                contentLength: content.length,
-                contentType: headers['content-type']
-            });
-
-            const response = await fetch(url, {
-                method: 'PUT',
-                headers: {
-                    ...headers,
-                    'Content-Length': content.length.toString()
-                },
-                body: content
-            });
-
-            if (!response.ok) {
-                LogManager.log(LogLevel.Debug, 'S3 write response error', {
-                    status: response.status,
-                    statusText: response.statusText,
-                    headers: this.getResponseHeaders(response)
-                });
-                const errorMessage = await this.parseErrorResponse(response);
-                throw new Error(errorMessage);
-            }
-
+            await this.handleS3Response(response, 'write');
             LogManager.log(LogLevel.Trace, `Successfully wrote ${file.name} to S3`);
-        };
-
-        try {
-            await this.retryWithBackoff(operation);
-        } catch (error) {
-            LogManager.log(LogLevel.Error, `Failed to write ${file.name} to S3 after retries`, error);
-            throw error;
-        }
+        }, AWSFiles.RETRY_OPTIONS);
     }
 
     async deleteFile(file: File): Promise<void> {
-        LogManager.log(LogLevel.Trace, `Deleting ${file.name} from S3`);
-        try {
-            const prefixedPath = this.paths.addVaultPrefix(file.remoteName || this.paths.localToRemoteName(file.name));
-            const encodedPath = encodeURIPath(prefixedPath);
+        return withRetry(async () => {
+            const remotePath = this.paths.addVaultPrefix(file.remoteName || this.paths.localToRemoteName(file.name));
+            const encodedPath = encodeURIPath(remotePath);
 
-            LogManager.log(LogLevel.Debug, 'Prepared S3 path', {
-                original: file.name,
-                prefixedPath,
-                encodedPath
-            });
+            LogManager.log(LogLevel.Trace, `Deleting ${file.name} from S3`);
 
-            const headers = await this.signing.signRequest({
+            const response = await this.makeS3Request({
                 method: 'DELETE',
-                path: `/${this.bucket}/${encodedPath}`,
-                queryParams: {},
-                host: new URL(this.endpoint).host,
-                amzdate: new Date().toISOString().replace(/[:-]|\.\d{3}/g, ''),
-                contentType: 'application/octet-stream'
-            });
-
-            const url = `${this.endpoint}/${this.bucket}/${encodedPath}`;
-            LogManager.log(LogLevel.Debug, 'Prepared S3 request', { url });
-
-            const response = await fetch(url, {
-                method: 'DELETE',
-                headers
+                path: `/${this.bucket}/${encodedPath}`
             });
 
             if (response.status !== 204 && !response.ok) {
-                LogManager.log(LogLevel.Debug, 'S3 delete response error', {
-                    status: response.status,
-                    statusText: response.statusText,
-                    headers: this.getResponseHeaders(response)
-                });
-                const errorMessage = await this.parseErrorResponse(response);
-                throw new Error(errorMessage);
+                await this.handleS3Response(response, 'delete');
             }
 
             LogManager.log(LogLevel.Trace, `Successfully deleted ${file.name} from S3`);
-        } catch (error) {
-            LogManager.log(LogLevel.Error, `Failed to delete ${file.name} from S3`, error);
-            throw error;
-        }
+        }, AWSFiles.RETRY_OPTIONS);
     }
 
     async getFiles(vaultPrefix: string): Promise<File[]> {
-        LogManager.log(LogLevel.Trace, 'Listing files in S3 bucket');
-        try {
-            const queryParams = {
-                'list-type': '2',
-                'prefix': vaultPrefix + '/'
-            };
+        return withRetry(async () => {
+            LogManager.log(LogLevel.Trace, 'Listing files in S3 bucket');
 
-            const headers = await this.signing.signRequest({
+            const response = await this.makeS3Request({
                 method: 'GET',
                 path: `/${this.bucket}`,
-                queryParams,
-                host: new URL(this.endpoint).host,
-                amzdate: new Date().toISOString().replace(/[:-]|\.\d{3}/g, ''),
+                queryParams: {
+                    'list-type': '2',
+                    'prefix': `${vaultPrefix}/`
+                },
                 contentType: 'application/xml'
             });
 
-            const queryString = new URLSearchParams(queryParams).toString();
-            const url = `${this.endpoint}/${this.bucket}?${queryString}`;
-            LogManager.log(LogLevel.Debug, 'Prepared S3 list request', { url });
+            await this.handleS3Response(response, 'list');
+            return this.parseFileList(await response.text());
+        }, AWSFiles.RETRY_OPTIONS);
+    }
 
-            const response = await fetch(url, {
-                method: 'GET',
-                headers
-            });
+    private parseFileList(xmlText: string): File[] {
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(xmlText, "text/xml");
+        const contents = xmlDoc.getElementsByTagName('Contents');
 
-            if (!response.ok) {
-                LogManager.log(LogLevel.Debug, 'S3 list response error', {
-                    status: response.status,
-                    statusText: response.statusText,
-                    headers: this.getResponseHeaders(response)
-                });
-                const errorMessage = await this.parseErrorResponse(response);
-                throw new Error(errorMessage);
-            }
-
-            const text = await response.text();
-            const parser = new DOMParser();
-            const xmlDoc = parser.parseFromString(text, "text/xml");
-            const contents = xmlDoc.getElementsByTagName('Contents');
-
-            if (!contents || contents.length === 0) {
-                LogManager.log(LogLevel.Debug, 'No files found in S3 bucket');
-                return [];
-            }
-
-            const processedFiles: File[] = Array.from(contents).map(item => {
-                const key = item.getElementsByTagName('Key')[0]?.textContent || '';
-                const lastModified = new Date(item.getElementsByTagName('LastModified')[0]?.textContent || '');
-                const eTag = item.getElementsByTagName('ETag')[0]?.textContent || '';
-                const size = Number(item.getElementsByTagName('Size')[0]?.textContent || '0');
-
-                const nameWithoutPrefix = this.paths.removeVaultPrefix(key);
-                const localName = this.paths.remoteToLocalName(nameWithoutPrefix);
-
-                return {
-                    name: localName,
-                    localName: localName,
-                    remoteName: key,
-                    mime: 'application/octet-stream',
-                    lastModified: lastModified,
-                    size: size,
-                    md5: eTag.replace(/"/g, ''),
-                    isDirectory: false
-                };
-            });
-
-            LogManager.log(LogLevel.Trace, `Found ${processedFiles.length} files in S3 bucket`);
-            return processedFiles;
-        } catch (error) {
-            LogManager.log(LogLevel.Error, 'Failed to list files in S3 bucket', error);
-            throw error;
+        if (!contents || contents.length === 0) {
+            LogManager.log(LogLevel.Debug, 'No files found in S3 bucket');
+            return [];
         }
+
+        const files = Array.from(contents).map(item => {
+            const key = item.getElementsByTagName('Key')[0]?.textContent ?? '';
+            const lastModified = new Date(item.getElementsByTagName('LastModified')[0]?.textContent ?? '');
+            const eTag = (item.getElementsByTagName('ETag')[0]?.textContent ?? '').replace(/"/g, '');
+            const size = Number(item.getElementsByTagName('Size')[0]?.textContent ?? '0');
+
+            const nameWithoutPrefix = this.paths.removeVaultPrefix(key);
+            const localName = this.paths.remoteToLocalName(nameWithoutPrefix);
+
+            return {
+                name: localName,
+                localName,
+                remoteName: key,
+                mime: AWSFiles.DEFAULT_CONTENT_TYPE,
+                lastModified,
+                size,
+                md5: eTag,
+                isDirectory: false
+            };
+        });
+
+        LogManager.log(LogLevel.Trace, `Found ${files.length} files in S3 bucket`);
+        return files;
     }
 }

@@ -1,39 +1,58 @@
+const URI_REPLACEMENTS = new Map([
+    ['~', '%7E'],
+    ["'", '%27'],
+    ['(', '%28'],
+    [')', '%29'],
+    ['!', '%21'],
+    ['*', '%2A'],
+    ['?', '%3F'],
+    ['+', '%20'],
+    ['%20', '%20']
+]);
+
+const DECODE_REPLACEMENTS = new Map([
+    ['%20', ' '],
+    ['%21', '!'],
+    ['%27', "'"],
+    ['%28', '('],
+    ['%29', ')'],
+    ['%2A', '*'],
+    ['%3F', '?'],
+    ['%7E', '~']
+]);
+
+function escapeRegExp(string: string): string {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export function encodeURIPath(uri: string): string {
-    let decodedUri;
-    try {
-        decodedUri = decodeURIComponent(uri);
-    } catch {
-        decodedUri = uri;
-    }
+    const decodedUri = (() => {
+        try {
+            return decodeURIComponent(uri);
+        } catch {
+            return uri;
+        }
+    })();
 
     return decodedUri.split('/').map(segment => {
         if (!segment) return '';
 
-        return encodeURIComponent(segment)
-            .replace(/~/g, '%7E')
-            .replace(/'/g, '%27')
-            .replace(/\(/g, '%28')
-            .replace(/\)/g, '%29')
-            .replace(/\!/g, '%21')
-            .replace(/\*/g, '%2A')
-            .replace(/\?/g, '%3F')
-            .replace(/\+/g, '%20')
-            .replace(/%20/g, '%20');
+        const encoded = encodeURIComponent(segment);
+        return Array.from(URI_REPLACEMENTS.entries()).reduce(
+            (result, [char, replacement]) =>
+                result.replace(new RegExp(escapeRegExp(char), 'g'), replacement),
+            encoded
+        );
     }).join('/');
 }
 
 export function decodeURIPath(remotePath: string): string {
     try {
-        let decoded = remotePath
-            .replace(/%20/g, ' ')
-            .replace(/%21/g, '!')
-            .replace(/%27/g, "'")
-            .replace(/%28/g, '(')
-            .replace(/%29/g, ')')
-            .replace(/%2A/g, '*')
-            .replace(/%3F/g, '?')
-            .replace(/%7E/g, '~');
-
+        const decoded = Array.from(DECODE_REPLACEMENTS.entries()).reduce(
+            (result, [encoded, char]) =>
+                result.replace(new RegExp(escapeRegExp(encoded), 'g'), char),
+            remotePath
+        );
         return decodeURIComponent(decoded);
     } catch {
         return remotePath;

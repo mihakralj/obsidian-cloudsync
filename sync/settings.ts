@@ -123,7 +123,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
                 .setDesc(`key1 or key2 available in Azure portal under Storage - Security - Access keys`)
                 .addText(text => text
                     .setPlaceholder('Enter access key')
-                    .setValue(this.plugin.settings.azure.accessKey)
+                    .setValue(this.plugin.settings.azure.accessKey ?? '')
                     .onChange(async (value) => {
                         this.plugin.settings.azure.accessKey = value;
                         await this.plugin.saveSettings();
@@ -133,7 +133,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
                 .setDesc('globally unique name available in Azure portal under Storage Accounts')
                 .addText(text => text
                     .setPlaceholder('Enter storage account name')
-                    .setValue(this.plugin.settings.azure.account)
+                    .setValue(this.plugin.settings.azure.account ?? '')
                     .onChange(async (value) => {
                         this.plugin.settings.azure.account = value;
                         await this.plugin.saveSettings();
@@ -188,7 +188,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
                 .setDesc('Acces key 1 or Access key 2 under IAM - Users - Account name')
                 .addText(text => text
                     .setPlaceholder('Enter access key')
-                    .setValue(this.plugin.settings.aws.accessKey)
+                    .setValue(this.plugin.settings.aws.accessKey ?? '')
                     .onChange(async (value) => {
                         this.plugin.settings.aws.accessKey = value;
                         await this.plugin.saveSettings();
@@ -199,7 +199,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
                 .setDesc('Retreived at the time of Access key creation - cannot be retreived later')
                 .addText(text => text
                     .setPlaceholder('Enter secret key')
-                    .setValue(this.plugin.settings.aws.secretKey)
+                    .setValue(this.plugin.settings.aws.secretKey ?? '')
                     .onChange(async (value) => {
                         this.plugin.settings.aws.secretKey = value;
                         await this.plugin.saveSettings();
@@ -210,7 +210,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
                 .setDesc('Globally unique bucket name available in AWS portal under S3 Storage')
                 .addText(text => text
                     .setPlaceholder('Enter bucket name')
-                    .setValue(this.plugin.settings.aws.bucket)
+                    .setValue(this.plugin.settings.aws.bucket ?? '')
                     .onChange(async (value) => {
                         this.plugin.settings.aws.bucket = value;
                         await this.plugin.saveSettings();
@@ -272,7 +272,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
                 .setDesc('Retreived from .json file with keys and credentials')
                 .addTextArea(text => text
                     .setPlaceholder('Enter private key JSON')
-                    .setValue(this.plugin.settings.gcp.privateKey)
+                    .setValue(this.plugin.settings.gcp.privateKey ?? '')
                     .onChange(async (value) => {
                         this.plugin.settings.gcp.privateKey = value;
                         await this.plugin.saveSettings();
@@ -284,7 +284,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
                 .setDesc('Retreived from .json file with keys and credentials')
                 .addText(text => text
                     .setPlaceholder('Enter client email')
-                    .setValue(this.plugin.settings.gcp.clientEmail)
+                    .setValue(this.plugin.settings.gcp.clientEmail ?? '')
                     .onChange(async (value) => {
                         this.plugin.settings.gcp.clientEmail = value;
                         await this.plugin.saveSettings();
@@ -295,7 +295,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
                 .setDesc('Retreived from GCP Cloud Storage console')
                 .addText(text => text
                     .setPlaceholder('Enter bucket name')
-                    .setValue(this.plugin.settings.gcp.bucket)
+                    .setValue(this.plugin.settings.gcp.bucket ?? '')
                     .onChange(async (value) => {
                         this.plugin.settings.gcp.bucket = value;
                         await this.plugin.saveSettings();
